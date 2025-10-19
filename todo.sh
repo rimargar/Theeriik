@@ -50,9 +50,9 @@ sudo dnf -y install docbook-style-xsl gcc gdb gnutls-devel gpgme-devel \
 echo "===== [7/14] Descargando y compilando Samba 4.20.5 ====="
 cd ~
 wget -q https://ftp.samba.org/pub/samba/samba-pubkey.asc
-wget -q https://ftp.samba.org/pub/samba/samba-4.20.5.tar.gz
-tar -xzf samba-4.20.5.tar.gz
-cd samba-4.20.5
+wget -q https://ftp.samba.org/pub/samba/samba-4.20.8.tar.gz
+tar -xzf samba-4.20.8.tar.gz
+cd samba-4.20.8
 
 ./configure \
   --prefix=/usr \
@@ -106,3 +106,108 @@ echo "Puedes verificar con:"
 echo "  smbclient -L localhost -U%"
 echo "  samba-tool domain level show"
 echo "  kinit administrator@RICARDO.MARTI.FP"
+
+#!/bin/bash
+# ==========================================================
+# SAMBA 4.20.8 - Configuración de servicios y comprobaciones finales
+# Autor: Nano & Ricardo
+# Desde el punto 6.6 (Verificación de configuración) hasta 7.5.4
+# Dominio: ricardo.marti.fp
+# Hostname: ricardo
+# IP Interna: 172.18.0.1/16
+# ==========================================================
+
+set -e
+
+echo "===== [6.6] Verificando instalación de Samba y Kerberos ====="
+
+echo "--- Versión de Samba ---"
+samba -V
+smbclient -V
+
+echo "--- Listado de recursos compartidos ---"
+smbclient -L localhost -U% || true
+
+echo "--- Registros DNS principales ---"
+host -t SRV _ldap._tcp.ricardo.marti.fp. || true
+host -t SRV _kerberos._udp.ricardo.marti.fp. || true
+host -t A ricardo.marti.fp. || true
+
+echo "--- Verificando Kerberos ---"
+kinit administrator@RICARDO.MARTI.FP || true
+klist || true
+
+echo "===== [6.7] Probando actualizaciones dinámicas de DNS ====="
+sudo samba_dnsupdate --verbose --all-names || true
+
+echo "===== [6.8] Configurando DHCP ====="
+sudo dnf -y install dhcp-server
+
+cat <<EOF | sudo tee /etc/dhcp/dhcpd.conf
+# Configuración DHCP Samba 4 (red interna)
+authoritative;
+option domain-name "ricardo.marti.fp";
+option domain-name-servers 172.18.0.1;
+option ntp-servers 172.18.0.1;
+option domain-search "ricardo.marti.fp";
+default-lease-time 600;
+max-lease-time 7200;
+adaptive-lease-time-threshold 70;
+log-facility local7;
+one-lease-per-client on;
+option time-offset 3600;
+
+subnet 172.18.0.0 netmask 255.255.0.0 {
+        range 172.18.0.10 172.18.0.199;
+        option routers 172.18.0.1;
+}
+EOF
+
+sudo dhcpd -t
+sudo systemctl enable --now dhcpd
+
+echo "===== [7.1-7.2] Configurando zonas de red ====="
+sudo nmcli connection modify enp0s3 connection.zone external
+sudo nmcli connection modify enp0s8 connection.zone internal
+sudo systemctl restart NetworkManager
+nmcli -g connection.id,connection.zone connection show enp0s{3,8}
+
+echo "===== [7.3] Levantando el cortafuegos ====="
+sudo systemctl enable --now firewalld
+sudo firewall-cmd --get-active-zones
+
+echo "===== [7.4] Comprobando enrutamiento ====="
+sudo firewall-cmd --zone=external --query-masquerade || sudo firewall-cmd --zone=external --add-masquerade --permanent
+sysctl net.ipv4.ip_forward
+
+echo "===== [7.5] Configurando cortafuegos ====="
+sudo firewall-cmd --zone=internal --list-all
+
+# Eliminamos servicios innecesarios
+sudo firewall-cmd --permanent --zone=internal --remove-service={samba-client,mdns,dhcpv6-client} || true
+sudo firewall-cmd --reload
+sudo firewall-cmd --zone=internal --list-services
+
+echo "===== [7.5.1 - 7.5.3] Abriendo puertos necesarios ====="
+sudo firewall-cmd --permanent --zone=internal --add-service=dhcp
+sudo firewall-cmd --permanent --zone=internal --add-service=samba-dc
+sudo firewall-cmd --permanent --zone=internal --add-service=ntp
+sudo firewall-cmd --reload
+
+echo "===== [7.5.4] Comprobando enrutamiento entre interfaces ====="
+echo "Reglas activas:"
+sudo firewall-cmd --list-all-zones | grep -E 'interfaces|services|masquerade' || true
+
+echo "===== ✅ SERVIDOR COMPLETAMENTE CONFIGURADO ====="
+echo "-----------------------------------------------------"
+echo "Dominio: ricardo.marti.fp"
+echo "Hostname: ricardo.marti.fp"
+echo "Administrador: Administrator / Administr@d0r"
+echo "-----------------------------------------------------"
+echo "Servicios activos:"
+sudo systemctl status samba named chronyd dhcpd firewalld --no-pager
+echo "-----------------------------------------------------"
+echo "Puedes probar los clientes Windows y Linux ahora."
+echo "En Windows: unir al dominio 'ricardo.marti.fp'"
+echo "En Linux: usar 'realm join ricardo.marti.fp -U Administrator'"
+
